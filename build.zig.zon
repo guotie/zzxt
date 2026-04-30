@@ -1,0 +1,12 @@
+.{
+    .name = .zzxt,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0xcc2e34b9c65f3c65,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+    },
+}
