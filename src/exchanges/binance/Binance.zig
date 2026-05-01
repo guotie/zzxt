@@ -8,6 +8,8 @@ const signing = @import("signing.zig");
 const parsing = @import("parsing.zig");
 const binance_types = @import("types.zig");
 
+const ManagedArrayList = std.array_list.Managed;
+
 const BASE_URL = "https://api.binance.com";
 
 pub const Config = struct {
@@ -19,16 +21,23 @@ pub const Binance = struct {
     limiter: rate_limiter.RateLimiter,
     credentials: ?signing.Credentials,
     allocator: std.mem.Allocator,
+    io: std.Io,
 
-    pub fn init(allocator: std.mem.Allocator, config: Config) !ExchangeMod.Exchange {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, config: Config) !ExchangeMod.Exchange {
         const self = try allocator.create(Binance);
         self.* = .{
-            .http = http_client.HttpClient.init(allocator),
+            .http = http_client.HttpClient.init(allocator, io),
             .limiter = rate_limiter.RateLimiter.init(1200),
             .credentials = config.credentials,
             .allocator = allocator,
+            .io = io,
         };
         return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn getTimestamp(self: *Binance) i64 {
+        const ts = std.Io.Timestamp.now(self.io, .real);
+        return @intCast(@divTrunc(ts.nanoseconds, 1_000_000));
     }
 
     fn deinitImpl(ctx: *anyopaque) void {
@@ -37,7 +46,7 @@ pub const Binance = struct {
         self.allocator.destroy(self);
     }
 
-    fn describeImpl(_: *anyopaque) Exchange.ExchangeDescription {
+    fn describeImpl(_: *anyopaque) ExchangeMod.ExchangeDescription {
         return .{
             .name = "binance",
             .has_fetch_order_book = true,
@@ -51,7 +60,7 @@ pub const Binance = struct {
         };
     }
 
-    fn fetchMarketsImpl(ctx: *anyopaque, allocator: std.mem.Allocator) Exchange.Errors![]types.Market.Market {
+    fn fetchMarketsImpl(ctx: *anyopaque, allocator: std.mem.Allocator) ExchangeMod.Errors![]types.Market {
         const self: *Binance = @ptrCast(@alignCast(ctx));
         self.limiter.acquire();
 
@@ -65,7 +74,7 @@ pub const Binance = struct {
         return parsing.parseMarkets(parsed.value, allocator) catch return error.BadResponse;
     }
 
-    fn fetchTickerImpl(ctx: *anyopaque, allocator: std.mem.Allocator, symbol: []const u8) Exchange.Errors!types.Ticker.Ticker {
+    fn fetchTickerImpl(ctx: *anyopaque, allocator: std.mem.Allocator, symbol: []const u8) ExchangeMod.Errors!types.Ticker {
         const self: *Binance = @ptrCast(@alignCast(ctx));
         self.limiter.acquire();
 
@@ -81,7 +90,7 @@ pub const Binance = struct {
         return parsing.parseTicker(symbol, parsed.value) catch return error.BadResponse;
     }
 
-    fn fetchTickersImpl(ctx: *anyopaque, allocator: std.mem.Allocator, symbols: ?[]const []const u8) Exchange.Errors![]types.Ticker.Ticker {
+    fn fetchTickersImpl(ctx: *anyopaque, allocator: std.mem.Allocator, symbols: ?[]const []const u8) ExchangeMod.Errors![]types.Ticker {
         _ = symbols;
         const self: *Binance = @ptrCast(@alignCast(ctx));
         self.limiter.acquire();
@@ -93,21 +102,21 @@ pub const Binance = struct {
         const parsed = std.json.parseFromSlice([]binance_types.TickerResponse, allocator, body, .{ .ignore_unknown_fields = true }) catch return error.BadResponse;
         defer parsed.deinit();
 
-        var tickers = try std.ArrayList(types.Ticker.Ticker).initCapacity(allocator, parsed.value.len);
-        errdefer tickers.deinit(allocator);
+        var tickers = try ManagedArrayList(types.Ticker).initCapacity(allocator, parsed.value.len);
+        errdefer tickers.deinit();
 
         for (parsed.value) |t| {
             const symbol_fmt = try std.fmt.allocPrint(allocator, "{s}/{s}", .{
                 t.symbol[0..3], // Simplified - real impl would parse properly
                 t.symbol[3..],
             });
-            try tickers.append(allocator, parsing.parseTicker(symbol_fmt, t) catch continue);
+            try tickers.append(parsing.parseTicker(symbol_fmt, t) catch continue);
         }
 
-        return try tickers.toOwnedSlice(allocator);
+        return try tickers.toOwnedSlice();
     }
 
-    fn fetchOrderBookImpl(ctx: *anyopaque, allocator: std.mem.Allocator, symbol: []const u8, limit: ?usize) Exchange.Errors!types.OrderBook.OrderBook {
+    fn fetchOrderBookImpl(ctx: *anyopaque, allocator: std.mem.Allocator, symbol: []const u8, limit: ?usize) ExchangeMod.Errors!types.OrderBook {
         const self: *Binance = @ptrCast(@alignCast(ctx));
         self.limiter.acquire();
 
@@ -128,49 +137,20 @@ pub const Binance = struct {
         return book;
     }
 
-    fn fetchOHLCVImpl(ctx: *anyopaque, allocator: std.mem.Allocator, symbol: []const u8, timeframe: []const u8, since: ?i64, limit: ?usize) Exchange.Errors![]types.OHLCV.OHLCV {
+    fn fetchOHLCVImpl(ctx: *anyopaque, allocator: std.mem.Allocator, symbol: []const u8, timeframe: []const u8, since: ?i64, limit: ?usize) ExchangeMod.Errors![]types.OHLCV {
         const self: *Binance = @ptrCast(@alignCast(ctx));
         self.limiter.acquire();
 
-        var buf = std.ArrayList(u8).init(allocator);
-        defer buf.deinit();
-
-        try buf.writer().print(BASE_URL ++ "/api/v3/klines?symbol={s}&interval={s}", .{ symbol, timeframe });
-        if (since) |s| try buf.writer().print("&startTime={d}", .{s});
-        if (limit) |l| try buf.writer().print("&limit={d}", .{l});
-
-        const url = try buf.toOwnedSlice();
-        defer allocator.free(url);
-
-        const body = self.http.get(url, null) catch return error.NetworkError;
-        defer self.allocator.free(body);
-
-        const parsed = std.json.parseFromSlice([][]const std.json.Value, allocator, body, .{}) catch return error.BadResponse;
-        defer parsed.deinit();
-
-        var candles = try std.ArrayList(types.OHLCV.OHLCV).initCapacity(allocator, parsed.value.len);
-        errdefer candles.deinit(allocator);
-
-        for (parsed.value) |kline| {
-            try candles.append(allocator, parsing.parseOHLCV(kline) catch continue);
-        }
-
-        return try candles.toOwnedSlice(allocator);
-    }
-
-    fn fetchTradesImpl(ctx: *anyopaque, allocator: std.mem.Allocator, symbol: []const u8, since: ?i64, limit: ?usize) Exchange.Errors![]types.Trade.Trade {
-        const self: *Binance = @ptrCast(@alignCast(ctx));
-        self.limiter.acquire();
-
-        var buf = std.ArrayList(u8).init(allocator);
-        defer buf.deinit();
-
-        try buf.writer().print(BASE_URL ++ "/api/v3/trades?symbol={s}", .{symbol});
-        if (since) |s| try buf.writer().print("&startTime={d}", .{s});
-        if (limit) |l| try buf.writer().print("&limit={d}", .{l});
-
-        const url = try buf.toOwnedSlice();
-        defer allocator.free(url);
+        const url = if (since) |s|
+            if (limit) |l|
+                try std.fmt.allocPrint(self.allocator, BASE_URL ++ "/api/v3/klines?symbol={s}&interval={s}&startTime={d}&limit={d}", .{ symbol, timeframe, s, l })
+            else
+                try std.fmt.allocPrint(self.allocator, BASE_URL ++ "/api/v3/klines?symbol={s}&interval={s}&startTime={d}", .{ symbol, timeframe, s })
+        else if (limit) |l|
+            try std.fmt.allocPrint(self.allocator, BASE_URL ++ "/api/v3/klines?symbol={s}&interval={s}&limit={d}", .{ symbol, timeframe, l })
+        else
+            try std.fmt.allocPrint(self.allocator, BASE_URL ++ "/api/v3/klines?symbol={s}&interval={s}", .{ symbol, timeframe });
+        defer self.allocator.free(url);
 
         const body = self.http.get(url, null) catch return error.NetworkError;
         defer self.allocator.free(body);
@@ -178,24 +158,55 @@ pub const Binance = struct {
         const parsed = std.json.parseFromSlice([]std.json.Value, allocator, body, .{}) catch return error.BadResponse;
         defer parsed.deinit();
 
-        var trades = try std.ArrayList(types.Trade.Trade).initCapacity(allocator, parsed.value.len);
-        errdefer trades.deinit(allocator);
+        var candles = try ManagedArrayList(types.OHLCV).initCapacity(allocator, parsed.value.len);
+        errdefer candles.deinit();
+
+        for (parsed.value) |kline| {
+            try candles.append(parsing.parseOHLCV(kline) catch continue);
+        }
+
+        return try candles.toOwnedSlice();
+    }
+
+    fn fetchTradesImpl(ctx: *anyopaque, allocator: std.mem.Allocator, symbol: []const u8, since: ?i64, limit: ?usize) ExchangeMod.Errors![]types.Trade {
+        const self: *Binance = @ptrCast(@alignCast(ctx));
+        self.limiter.acquire();
+
+        const url = if (since) |s|
+            if (limit) |l|
+                try std.fmt.allocPrint(self.allocator, BASE_URL ++ "/api/v3/trades?symbol={s}&startTime={d}&limit={d}", .{ symbol, s, l })
+            else
+                try std.fmt.allocPrint(self.allocator, BASE_URL ++ "/api/v3/trades?symbol={s}&startTime={d}", .{ symbol, s })
+        else if (limit) |l|
+            try std.fmt.allocPrint(self.allocator, BASE_URL ++ "/api/v3/trades?symbol={s}&limit={d}", .{ symbol, l })
+        else
+            try std.fmt.allocPrint(self.allocator, BASE_URL ++ "/api/v3/trades?symbol={s}", .{symbol});
+        defer self.allocator.free(url);
+
+        const body = self.http.get(url, null) catch return error.NetworkError;
+        defer self.allocator.free(body);
+
+        const parsed = std.json.parseFromSlice([]std.json.Value, allocator, body, .{}) catch return error.BadResponse;
+        defer parsed.deinit();
+
+        var trades = try ManagedArrayList(types.Trade).initCapacity(allocator, parsed.value.len);
+        errdefer trades.deinit();
 
         for (parsed.value) |t| {
             var trade = parsing.parseTrade(t) catch continue;
             trade.symbol = symbol;
-            try trades.append(allocator, trade);
+            try trades.append(trade);
         }
 
-        return try trades.toOwnedSlice(allocator);
+        return try trades.toOwnedSlice();
     }
 
-    fn fetchBalanceImpl(ctx: *anyopaque, allocator: std.mem.Allocator) Exchange.Errors!types.Balance.Balances {
+    fn fetchBalanceImpl(ctx: *anyopaque, allocator: std.mem.Allocator) ExchangeMod.Errors!types.Balances {
         const self: *Binance = @ptrCast(@alignCast(ctx));
         const creds = self.credentials orelse return error.AuthenticationError;
         self.limiter.acquire();
 
-        const timestamp = std.time.milliTimestamp();
+        const timestamp = self.getTimestamp();
         const query = try std.fmt.allocPrint(self.allocator, "timestamp={d}", .{timestamp});
         defer self.allocator.free(query);
 
@@ -218,7 +229,7 @@ pub const Binance = struct {
         return parsing.parseBalance(parsed.value, allocator) catch return error.BadResponse;
     }
 
-    fn createOrderImpl(ctx: *anyopaque, allocator: std.mem.Allocator, symbol: []const u8, order_type: Exchange.OrderType, side: Exchange.Side, amount: types.Fixed, price: ?types.Fixed) Exchange.Errors!types.Order.Order {
+    fn createOrderImpl(ctx: *anyopaque, allocator: std.mem.Allocator, symbol: []const u8, order_type: ExchangeMod.OrderType, side: ExchangeMod.Side, amount: types.Fixed, price: ?types.Fixed) ExchangeMod.Errors!types.Order {
         const self: *Binance = @ptrCast(@alignCast(ctx));
         const creds = self.credentials orelse return error.AuthenticationError;
         self.limiter.acquire();
@@ -231,7 +242,7 @@ pub const Binance = struct {
             if (side == .buy) "BUY" else "SELL",
             if (order_type == .limit) "LIMIT" else "MARKET",
             amount_str,
-            std.time.milliTimestamp(),
+            self.getTimestamp(),
         });
         defer self.allocator.free(query);
 
@@ -260,13 +271,13 @@ pub const Binance = struct {
         return parsing.parseOrder(parsed.value) catch return error.BadResponse;
     }
 
-    fn cancelOrderImpl(ctx: *anyopaque, allocator: std.mem.Allocator, id: []const u8, symbol: ?[]const u8) Exchange.Errors!types.Order.Order {
+    fn cancelOrderImpl(ctx: *anyopaque, allocator: std.mem.Allocator, id: []const u8, symbol: ?[]const u8) ExchangeMod.Errors!types.Order {
         const self: *Binance = @ptrCast(@alignCast(ctx));
         const creds = self.credentials orelse return error.AuthenticationError;
         self.limiter.acquire();
 
         const sym = symbol orelse return error.BadRequest;
-        const query = try std.fmt.allocPrint(self.allocator, "symbol={s}&orderId={s}&timestamp={d}", .{ sym, id, std.time.milliTimestamp() });
+        const query = try std.fmt.allocPrint(self.allocator, "symbol={s}&orderId={s}&timestamp={d}", .{ sym, id, self.getTimestamp() });
         defer self.allocator.free(query);
 
         const signed_query = try signing.signQuery(self.allocator, creds, query);
@@ -288,13 +299,13 @@ pub const Binance = struct {
         return parsing.parseOrder(parsed.value) catch return error.BadResponse;
     }
 
-    fn fetchOrderImpl(ctx: *anyopaque, allocator: std.mem.Allocator, id: []const u8, symbol: ?[]const u8) Exchange.Errors!types.Order.Order {
+    fn fetchOrderImpl(ctx: *anyopaque, allocator: std.mem.Allocator, id: []const u8, symbol: ?[]const u8) ExchangeMod.Errors!types.Order {
         const self: *Binance = @ptrCast(@alignCast(ctx));
         const creds = self.credentials orelse return error.AuthenticationError;
         self.limiter.acquire();
 
         const sym = symbol orelse return error.BadRequest;
-        const query = try std.fmt.allocPrint(self.allocator, "symbol={s}&orderId={s}&timestamp={d}", .{ sym, id, std.time.milliTimestamp() });
+        const query = try std.fmt.allocPrint(self.allocator, "symbol={s}&orderId={s}&timestamp={d}", .{ sym, id, self.getTimestamp() });
         defer self.allocator.free(query);
 
         const signed_query = try signing.signQuery(self.allocator, creds, query);
@@ -316,16 +327,16 @@ pub const Binance = struct {
         return parsing.parseOrder(parsed.value) catch return error.BadResponse;
     }
 
-    fn fetchOpenOrdersImpl(ctx: *anyopaque, allocator: std.mem.Allocator, symbol: ?[]const u8) Exchange.Errors![]types.Order.Order {
+    fn fetchOpenOrdersImpl(ctx: *anyopaque, allocator: std.mem.Allocator, symbol: ?[]const u8) ExchangeMod.Errors![]types.Order {
         const self: *Binance = @ptrCast(@alignCast(ctx));
         const creds = self.credentials orelse return error.AuthenticationError;
         self.limiter.acquire();
 
         var query: []const u8 = undefined;
         if (symbol) |s| {
-            query = try std.fmt.allocPrint(self.allocator, "symbol={s}&timestamp={d}", .{ s, std.time.milliTimestamp() });
+            query = try std.fmt.allocPrint(self.allocator, "symbol={s}&timestamp={d}", .{ s, self.getTimestamp() });
         } else {
-            query = try std.fmt.allocPrint(self.allocator, "timestamp={d}", .{std.time.milliTimestamp()});
+            query = try std.fmt.allocPrint(self.allocator, "timestamp={d}", .{self.getTimestamp()});
         }
         defer self.allocator.free(query);
 
@@ -345,17 +356,17 @@ pub const Binance = struct {
         const parsed = std.json.parseFromSlice([]std.json.Value, allocator, body, .{}) catch return error.BadResponse;
         defer parsed.deinit();
 
-        var orders = try std.ArrayList(types.Order.Order).initCapacity(allocator, parsed.value.len);
-        errdefer orders.deinit(allocator);
+        var orders = try ManagedArrayList(types.Order).initCapacity(allocator, parsed.value.len);
+        errdefer orders.deinit();
 
         for (parsed.value) |o| {
-            try orders.append(allocator, parsing.parseOrder(o) catch continue);
+            try orders.append(parsing.parseOrder(o) catch continue);
         }
 
-        return try orders.toOwnedSlice(allocator);
+        return try orders.toOwnedSlice();
     }
 
-    const vtable = Exchange.VTable{
+    const vtable = ExchangeMod.VTable{
         .deinit = deinitImpl,
         .describe = describeImpl,
         .fetch_markets = fetchMarketsImpl,

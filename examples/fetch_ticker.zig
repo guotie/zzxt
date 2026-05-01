@@ -6,7 +6,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("Initializing Binance exchange...\n", .{});
 
-    const exchange = try zzxt.Binance.Binance.init(allocator, .{});
+    const exchange = try zzxt.Binance.Binance.init(allocator, init.io, .{});
     defer exchange.deinit();
 
     std.debug.print("Fetching BTC/USDT ticker...\n", .{});

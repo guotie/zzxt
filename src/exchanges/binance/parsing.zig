@@ -6,8 +6,8 @@ const binance_types = @import("types.zig");
 const Fixed = types.Fixed;
 const FIXED_SCALE = types.FIXED_SCALE;
 
-pub fn parseTicker(symbol: []const u8, json: binance_types.TickerResponse) !types.Ticker.Ticker {
-    return types.Ticker.Ticker{
+pub fn parseTicker(symbol: []const u8, json: binance_types.TickerResponse) !types.Ticker {
+    return types.Ticker{
         .symbol = symbol,
         .timestamp = json.closeTime,
         .high = try json_utils.decimalStringToFixed(json.highPrice),
@@ -29,8 +29,8 @@ pub fn parseTicker(symbol: []const u8, json: binance_types.TickerResponse) !type
     };
 }
 
-pub fn parseOrderBook(json: binance_types.OrderBookResponse, allocator: std.mem.Allocator) !types.OrderBook.OrderBook {
-    var bids = try std.ArrayList(types.OrderBook.Level).initCapacity(allocator, json.bids.len);
+pub fn parseOrderBook(json: binance_types.OrderBookResponse, allocator: std.mem.Allocator) !types.OrderBook {
+    var bids = try std.ArrayList(types.Level).initCapacity(allocator, json.bids.len);
     errdefer bids.deinit(allocator);
 
     for (json.bids) |level| {
@@ -42,7 +42,7 @@ pub fn parseOrderBook(json: binance_types.OrderBookResponse, allocator: std.mem.
         }
     }
 
-    var asks = try std.ArrayList(types.OrderBook.Level).initCapacity(allocator, json.asks.len);
+    var asks = try std.ArrayList(types.Level).initCapacity(allocator, json.asks.len);
     errdefer asks.deinit(allocator);
 
     for (json.asks) |level| {
@@ -54,7 +54,7 @@ pub fn parseOrderBook(json: binance_types.OrderBookResponse, allocator: std.mem.
         }
     }
 
-    return types.OrderBook.OrderBook{
+    return types.OrderBook{
         .symbol = "",
         .bids = try bids.toOwnedSlice(allocator),
         .asks = try asks.toOwnedSlice(allocator),
@@ -64,11 +64,11 @@ pub fn parseOrderBook(json: binance_types.OrderBookResponse, allocator: std.mem.
     };
 }
 
-pub fn parseOHLCV(json: std.json.Value) !types.OHLCV.OHLCV {
-    const arr = json.array;
+pub fn parseOHLCV(json: std.json.Value) !types.OHLCV {
+    const arr = json.array.items;
     if (arr.len < 6) return error.BadResponse;
 
-    return types.OHLCV.OHLCV{
+    return types.OHLCV{
         .timestamp = @intCast(arr[0].integer),
         .open = try json_utils.decimalStringToFixed(arr[1].string),
         .high = try json_utils.decimalStringToFixed(arr[2].string),
@@ -78,10 +78,10 @@ pub fn parseOHLCV(json: std.json.Value) !types.OHLCV.OHLCV {
     };
 }
 
-pub fn parseTrade(json: std.json.Value) !types.Trade.Trade {
+pub fn parseTrade(json: std.json.Value) !types.Trade {
     const obj = json.object;
 
-    return types.Trade.Trade{
+    return types.Trade{
         .id = obj.get("id").?.string,
         .symbol = "",
         .timestamp = @intCast(obj.get("time").?.integer),
@@ -95,9 +95,9 @@ pub fn parseTrade(json: std.json.Value) !types.Trade.Trade {
     };
 }
 
-pub fn parseMarkets(json: std.json.Value, allocator: std.mem.Allocator) ![]types.Market.Market {
-    const symbols = json.object.get("symbols").?.array;
-    var markets = try std.ArrayList(types.Market.Market).initCapacity(allocator, symbols.len);
+pub fn parseMarkets(json: std.json.Value, allocator: std.mem.Allocator) ![]types.Market {
+    const symbols = json.object.get("symbols").?.array.items;
+    var markets = try std.ArrayList(types.Market).initCapacity(allocator, symbols.len);
     errdefer markets.deinit(allocator);
 
     for (symbols) |sym| {
@@ -141,11 +141,11 @@ pub fn parseMarkets(json: std.json.Value, allocator: std.mem.Allocator) ![]types
     return try markets.toOwnedSlice(allocator);
 }
 
-pub fn parseBalance(json: std.json.Value, allocator: std.mem.Allocator) !types.Balance.Balances {
+pub fn parseBalance(json: std.json.Value, allocator: std.mem.Allocator) !types.Balances {
     const obj = json.object;
-    const balances_arr = obj.get("balances").?.array;
+    const balances_arr = obj.get("balances").?.array.items;
 
-    var entries = std.StringHashMap(types.Balance.Balance).init(allocator);
+    var entries = std.StringHashMap(types.Balance).init(allocator);
     errdefer entries.deinit();
 
     for (balances_arr) |bal| {
@@ -163,17 +163,17 @@ pub fn parseBalance(json: std.json.Value, allocator: std.mem.Allocator) !types.B
         }
     }
 
-    return types.Balance.Balances{
+    return types.Balances{
         .entries = entries,
         .info = json,
     };
 }
 
-pub fn parseOrder(json: std.json.Value) !types.Order.Order {
+pub fn parseOrder(json: std.json.Value) !types.Order {
     const obj = json.object;
 
     const status_str = obj.get("status").?.string;
-    const status: types.Order.OrderStatus = switch (status_str[0]) {
+    const status: types.OrderStatus = switch (status_str[0]) {
         'N' => .open, // NEW
         'F' => .open, // FILLED -> closed
         'C' => .canceled, // CANCELED
@@ -182,16 +182,16 @@ pub fn parseOrder(json: std.json.Value) !types.Order.Order {
     };
 
     const side_str = obj.get("side").?.string;
-    const side: types.Order.Side = if (std.mem.eql(u8, side_str, "BUY")) .buy else .sell;
+    const side: types.Side = if (std.mem.eql(u8, side_str, "BUY")) .buy else .sell;
 
     const type_str = obj.get("type").?.string;
-    const order_type: types.Order.OrderType = if (std.mem.eql(u8, type_str, "LIMIT")) .limit else .market;
+    const order_type: types.OrderType = if (std.mem.eql(u8, type_str, "LIMIT")) .limit else .market;
 
     const price = try json_utils.parseFixedField(json, "price");
     const amount = try json_utils.decimalStringToFixed(obj.get("origQty").?.string);
     const filled = try json_utils.decimalStringToFixed(obj.get("executedQty").?.string);
 
-    return types.Order.Order{
+    return types.Order{
         .id = obj.get("orderId").?.string,
         .symbol = obj.get("symbol").?.string,
         .status = status,

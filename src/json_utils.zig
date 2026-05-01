@@ -99,7 +99,7 @@ pub fn parseFixedField(json: std.json.Value, field: []const u8) !?Fixed {
     const obj = json.object;
     const val = obj.get(field) orelse return null;
     switch (val) {
-        .string => |s| return decimalStringToFixed(s),
+        .string => |s| return try decimalStringToFixed(s),
         .integer => |i| {
             const scale: u64 = 1_000_000_000;
             return std.math.mul(u64, @intCast(i), scale) catch return error.Overflow;

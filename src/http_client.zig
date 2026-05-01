@@ -1,11 +1,10 @@
 const std = @import("std");
-const Io = std.Io;
 
 pub const HttpClient = struct {
     client: std.http.Client,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, io: Io) HttpClient {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) HttpClient {
         return .{
             .client = std.http.Client{ .allocator = allocator, .io = io },
             .allocator = allocator,
@@ -29,36 +28,27 @@ pub const HttpClient = struct {
     }
 
     fn request(self: *HttpClient, method: std.http.Method, url: []const u8, body: ?[]const u8, headers: ?[]const std.http.Header) ![]u8 {
-        const uri = try std.Uri.parse(url);
+        var allocating = std.Io.Writer.Allocating.init(self.allocator);
 
-        var req = try self.client.open(method, uri, .{
+        const result = try self.client.fetch(.{
+            .location = .{ .url = url },
+            .method = method,
+            .payload = body,
             .extra_headers = headers orelse &.{},
-        }, .{});
-        defer req.deinit();
+            .response_writer = &allocating.writer,
+        });
 
-        if (body) |b| {
-            req.transfer_encoding = .{ .content_length = b.len };
-        }
-
-        try req.send(.{});
-        if (body) |b| {
-            try req.writeAll(b);
-        }
-        try req.finish();
-        try req.wait();
-
-        const response = req.response;
-        if (response.status != .ok) {
+        if (result.status != .ok) {
             return error.NetworkError;
         }
 
-        const data = try req.reader().readAllAlloc(self.allocator, 1024 * 1024);
-        return data;
+        // The Allocating writer owns the memory, return it
+        return allocating.toOwnedSlice() catch return error.OutOfMemory;
     }
 };
 
 test "HttpClient init/deinit" {
     const testing = std.testing;
-    var client = HttpClient.init(testing.allocator, Io.failing);
+    var client = HttpClient.init(testing.allocator, std.Io.failing);
     defer client.deinit();
 }
