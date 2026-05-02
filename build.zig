@@ -24,8 +24,34 @@ pub fn build(b: *std.Build) void {
     });
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
-    const test_step = b.step("test", "Run tests");
+    const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_mod_tests.step);
+
+    // Integration tests
+    const integration_test_files = [_][]const u8{
+        "tests/json_utils_test.zig",
+        "tests/signing_test.zig",
+        "tests/binance_parsing_test.zig",
+        "tests/exchange_vtable_test.zig",
+        "tests/errors_test.zig",
+        "tests/types_test.zig",
+        "tests/rate_limiter_test.zig",
+    };
+
+    for (integration_test_files) |test_file| {
+        const int_test = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(test_file),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "zzxt", .module = mod },
+                },
+            }),
+        });
+        const run_int_test = b.addRunArtifact(int_test);
+        test_step.dependOn(&run_int_test.step);
+    }
 
     const exe = b.addExecutable(.{
         .name = "fetch_ticker",
