@@ -4,10 +4,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const ws_dep = b.dependency("websocket", .{ .target = target, .optimize = optimize });
+
     const mod = b.addModule("zzxt", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
+    mod.addImport("websocket", ws_dep.module("websocket"));
 
     const lib = b.addLibrary(.{
         .name = "zzxt",
@@ -17,6 +20,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    lib.root_module.addImport("websocket", ws_dep.module("websocket"));
     b.installArtifact(lib);
 
     const mod_tests = b.addTest(.{
@@ -36,6 +40,8 @@ pub fn build(b: *std.Build) void {
         "tests/errors_test.zig",
         "tests/types_test.zig",
         "tests/rate_limiter_test.zig",
+        "tests/live_binance_test.zig",
+        "tests/websocket_test.zig",
     };
 
     for (integration_test_files) |test_file| {

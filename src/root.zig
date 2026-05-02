@@ -41,3 +41,7 @@ pub const FIXED_SCALE = types.FIXED_SCALE;
 
 // Exchange implementations
 pub const Binance = @import("exchanges/binance/Binance.zig");
+
+// WebSocket
+pub const WebSocket = @import("WebSocket.zig").WebSocket;
+pub const BinanceWs = @import("exchanges/binance/BinanceWs.zig").BinanceWs;
