@@ -59,6 +59,9 @@ pub const BinanceWs = struct {
         port: ?u16 = null,
         time_unit: TimeUnit = .millisecond,
         max_size: usize = 65536,
+        /// Optional HTTP proxy URL used to create a CONNECT tunnel.
+        /// Example: "http://127.0.0.1:7890".
+        proxy_url: ?[]const u8 = null,
 
         pub fn resolvedPort(self: Options) u16 {
             return self.port orelse self.endpoint.defaultPort();
@@ -541,6 +544,7 @@ pub const BinanceWs = struct {
             .tls = true,
             .path = path,
             .max_size = options.max_size,
+            .proxy_url = options.proxy_url,
         });
 
         return .{

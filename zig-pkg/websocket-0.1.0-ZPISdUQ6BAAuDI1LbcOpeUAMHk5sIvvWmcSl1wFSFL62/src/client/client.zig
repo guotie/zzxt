@@ -62,9 +62,17 @@ pub const Client = struct {
         max_size: usize = 65536,
         buffer_size: usize = 4096,
         ca_bundle: ?Bundle = null,
+        proxy: ?Proxy = null,
         mask_fn: *const fn (Io) [4]u8 = generateMask,
         buffer_provider: ?*buffer.Provider = null,
         compression: ?CompressionOpts = null,
+    };
+
+    pub const Proxy = struct {
+        host: []const u8,
+        port: u16,
+        /// Value for Proxy-Authorization, for example "Basic <base64>".
+        authorization: ?[]const u8 = null,
     };
 
     pub const HandshakeOpts = struct {
@@ -86,7 +94,10 @@ pub const Client = struct {
         }
 
         const host_name = try Io.net.HostName.init(config.host);
-        const net_stream = try host_name.connect(io, config.port, .{.mode = .stream});
+        const net_stream = if (config.proxy) |proxy|
+            try connectProxyTunnel(io, allocator, proxy, host_name, config.port)
+        else
+            try host_name.connect(io, config.port, .{ .mode = .stream });
 
         var tls_client: ?*TLSClient = null;
         if (config.tls) {
@@ -130,6 +141,47 @@ pub const Client = struct {
             ._compression_opts = null, //TODO: ZIG 0.15
             ._reader = Reader.init(reader_buf, buffer_provider, null),
         };
+    }
+
+    fn connectProxyTunnel(io: Io, allocator: Allocator, proxy: Proxy, target_host: Io.net.HostName, target_port: u16) !Io.net.Stream {
+        const proxy_host = try Io.net.HostName.init(proxy.host);
+        const net_stream = try proxy_host.connect(io, proxy.port, .{ .mode = .stream });
+        errdefer net_stream.close(io);
+
+        var request = std.Io.Writer.Allocating.init(allocator);
+        defer request.deinit();
+
+        try request.writer.print("CONNECT {s}:{d} HTTP/1.1\r\nhost: {s}:{d}\r\nproxy-connection: keep-alive\r\n", .{
+            target_host.bytes,
+            target_port,
+            target_host.bytes,
+            target_port,
+        });
+        if (proxy.authorization) |authorization| {
+            try request.writer.print("proxy-authorization: {s}\r\n", .{authorization});
+        }
+        try request.writer.writeAll("\r\n");
+
+        var write_buf: [1024]u8 = undefined;
+        var writer = net_stream.writer(io, &write_buf);
+        try writer.interface.writeAll(request.writer.buffered());
+        try writer.interface.flush();
+
+        var read_buf: [4096]u8 = undefined;
+        var reader = net_stream.reader(io, &read_buf);
+        const status_line = std.mem.trimRight(u8, try reader.interface.takeDelimiterExclusive('\n'), "\r");
+        if (!std.mem.startsWith(u8, status_line, "HTTP/1.1 200 ") and
+            !std.mem.startsWith(u8, status_line, "HTTP/1.0 200 "))
+        {
+            return error.ProxyConnectFailed;
+        }
+
+        while (true) {
+            const line = std.mem.trimRight(u8, try reader.interface.takeDelimiterExclusive('\n'), "\r");
+            if (line.len == 0) break;
+        }
+
+        return net_stream;
     }
 
     pub fn deinit(self: *Client) void {

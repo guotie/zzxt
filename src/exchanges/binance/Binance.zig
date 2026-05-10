@@ -14,6 +14,9 @@ const BASE_URL = "https://api.binance.com";
 
 pub const Config = struct {
     credentials: ?signing.Credentials = null,
+    /// Optional HTTP(S) proxy URL used by REST requests.
+    /// Example: "http://127.0.0.1:7890".
+    proxy_url: ?[]const u8 = null,
 };
 
 pub const Binance = struct {
@@ -25,8 +28,12 @@ pub const Binance = struct {
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, config: Config) !ExchangeMod.Exchange {
         const self = try allocator.create(Binance);
+        errdefer allocator.destroy(self);
+
         self.* = .{
-            .http = http_client.HttpClient.init(allocator, io),
+            .http = try http_client.HttpClient.initWithConfig(allocator, io, .{
+                .proxy_url = config.proxy_url,
+            }),
             .limiter = rate_limiter.RateLimiter.init(1200),
             .credentials = config.credentials,
             .allocator = allocator,
